@@ -5,12 +5,50 @@ import tempfile
 import os
 import subprocess
 import streamlit.components.v1 as components
+import torch
+from gfpgan import GFPGANer
 
 # ================== CONFIG ==================
 CASCADE_PATH = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
 DNN_PROTO = "deploy.prototxt"
 DNN_MODEL = "res10_300x300_ssd_iter_140000.caffemodel"
 FFMPEG_PATH = "ffmpeg"
+
+# ================== GFPGAN SETUP ==================
+def load_gfpgan():
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    restorer = GFPGANer(
+        model_path="GFPGANv1.4.pth",
+        upscale=2,
+        arch="clean",
+        channel_multiplier=2,
+        bg_upsampler=None,
+        device=device
+    )
+    return restorer
+
+@st.cache_resource
+def get_gfpgan_model():
+    return load_gfpgan()
+
+def enhance_face_gfpgan(image, restorer):
+    _, _, restored_img = restorer.enhance(
+        image,
+        has_aligned=False,
+        only_center_face=False,
+        paste_back=True
+    )
+    return restored_img
+
+def enhance_detected_faces(frame, detector, method, restorer):
+    detections = detect_faces(frame, detector, method)
+    for (x, y, w, h, crop) in detections:
+        if crop.size == 0:
+            continue
+        enhanced = enhance_face_gfpgan(crop, restorer)
+        enhanced_resized = cv2.resize(enhanced, (w, h))
+        frame[y:y+h, x:x+w] = enhanced_resized
+    return frame
 
 # ================== LOAD ADSENSE SCRIPT ==================
 components.html("""
@@ -37,8 +75,10 @@ with left_col:
 
 # ================== MAIN CONTENT ==================
 with center_col:
-
-    st.title("🎥 AI DataSet Creator + Video Frame Reducer + Dual Face Detection")
+    st.title("🎥 Video Frame Reducer + Dual Face Detection")
+    
+    # ✅ Checkbox to enable/disable face enhancement
+    enhance_toggle = st.checkbox("Enable AI Face Enhancement (GFPGAN)", value=True)
 
     # --------- HELPERS ---------
     def mse(img1, img2):
@@ -56,7 +96,7 @@ with center_col:
         return cv2.dnn.readNetFromCaffe(DNN_PROTO, DNN_MODEL)
 
     def detect_faces(frame_bgr, detector, method="haar", conf_threshold=0.5):
-        crops = []
+        results = []
         h, w = frame_bgr.shape[:2]
 
         if method == "haar":
@@ -64,7 +104,8 @@ with center_col:
             gray = cv2.equalizeHist(gray)
             faces = detector.detectMultiScale(gray, 1.1, 5, minSize=(40, 40))
             for (x, y, fw, fh) in faces:
-                crops.append(frame_bgr[y:y+fh, x:x+fw])
+                crop = frame_bgr[y:y+fh, x:x+fw]
+                results.append((x, y, fw, fh, crop))
         else:
             blob = cv2.dnn.blobFromImage(
                 cv2.resize(frame_bgr, (300, 300)),
@@ -74,7 +115,6 @@ with center_col:
             )
             detector.setInput(blob)
             detections = detector.forward()
-
             for i in range(detections.shape[2]):
                 confidence = detections[0, 0, i, 2]
                 if confidence > conf_threshold:
@@ -82,33 +122,27 @@ with center_col:
                     (x1, y1, x2, y2) = box.astype("int")
                     x1, y1 = max(0, x1), max(0, y1)
                     x2, y2 = min(w, x2), min(h, y2)
-                    crops.append(frame_bgr[y1:y2, x1:x2])
+                    fw, fh = x2 - x1, y2 - y1
+                    crop = frame_bgr[y1:y2, x1:x2]
+                    results.append((x1, y1, fw, fh, crop))
+        return results
 
-        return crops
-
-    # -------- Unique Face Filter --------
     def is_new_crop(crop, gallery, threshold=0.2):
         if len(gallery) == 0:
             return True
-
         crop_small = cv2.resize(crop, (64, 64))
         crop_gray = cv2.cvtColor(crop_small, cv2.COLOR_BGR2GRAY)
         crop_gray = cv2.GaussianBlur(crop_gray, (5, 5), 0)
-
         for g in gallery:
             g_small = cv2.resize(g, (64, 64))
             g_gray = cv2.cvtColor(g_small, cv2.COLOR_BGR2GRAY)
             g_gray = cv2.GaussianBlur(g_gray, (5, 5), 0)
-
             if mse(crop_gray, g_gray) < threshold * (255 ** 2):
                 return False
-
         return True
 
-    # -------- Collect Faces --------
     def collect_faces_from_video(video_path, detector, method, max_items=30, step=5):
         cap = cv2.VideoCapture(video_path)
-
         if not cap.isOpened():
             raise RuntimeError("Error opening video.")
 
@@ -117,26 +151,26 @@ with center_col:
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         progress = st.progress(0)
 
+        restorer = get_gfpgan_model() if enhance_toggle else None
+
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
-
             frame_idx += 1
             progress.progress(min(frame_idx / total_frames, 1.0))
-
             if frame_idx % step != 0:
                 continue
-
             frame_small = cv2.resize(frame, None, fx=0.5, fy=0.5)
-            crops = detect_faces(frame_small, detector, method)
+            detections = detect_faces(frame_small, detector, method)
 
-            for crop in crops:
+            for (x, y, w, h, crop) in detections:
                 if len(gallery) >= max_items:
                     break
                 if is_new_crop(crop, gallery):
+                    if enhance_toggle:
+                        crop = enhance_face_gfpgan(crop, restorer)
                     gallery.append(crop)
-
             if len(gallery) >= max_items:
                 break
 
@@ -144,50 +178,37 @@ with center_col:
         progress.empty()
         return gallery
 
-    # -------- Filter Similar Frames --------
     def filter_similar_frames(input_path, output_path, similarity_threshold=0.05):
         cap = cv2.VideoCapture(input_path)
-
         fps = cap.get(cv2.CAP_PROP_FPS)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-
         ret, prev_frame = cap.read()
         prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
         out.write(prev_frame)
-
         max_mse = 255 ** 2
 
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
-
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             similarity = mse(prev_gray, gray)
-
             if similarity > similarity_threshold * max_mse:
                 out.write(frame)
                 prev_gray = gray
-
         cap.release()
         out.release()
 
-    # -------- Split Large Video (>200MB) --------
     def split_video_if_large(input_path, max_size_mb=200):
-
         file_size_mb = os.path.getsize(input_path) / (1024 * 1024)
-
         if file_size_mb <= max_size_mb:
             return [input_path]
 
         st.warning(f"Video is {file_size_mb:.2f} MB. Splitting into {max_size_mb}MB parts...")
-
         output_pattern = input_path.replace(".mp4", "_part_%03d.mp4")
-
         subprocess.run([
             FFMPEG_PATH,
             "-i", input_path,
@@ -198,26 +219,22 @@ with center_col:
             "-reset_timestamps", "1",
             output_pattern
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
         parts = sorted([
             os.path.join(os.path.dirname(input_path), f)
             for f in os.listdir(os.path.dirname(input_path))
             if "_part_" in f
         ])
-
         return parts
 
     # --------- UI ---------
     uploaded_file = st.file_uploader("Upload video", type=["mp4", "mov", "avi", "mkv"])
     threshold = st.slider("Frame similarity threshold", 0.01, 0.10, 0.05, 0.01)
-
     detector_choice = st.radio(
         "Choose Face Detection Method:",
         ["Haar Cascade (Fast)", "DNN (More Accurate)"]
     )
 
     if uploaded_file is not None:
-
         if "Haar" in detector_choice:
             detector = load_haar()
             method = "haar"
@@ -228,54 +245,69 @@ with center_col:
         st.video(uploaded_file)
 
         if st.button("Analyze and Process"):
-
             with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_in:
                 tmp_in.write(uploaded_file.read())
                 original_path = tmp_in.name
 
             try:
                 video_parts = split_video_if_large(original_path)
-
                 all_original_faces = []
                 all_processed_faces = []
                 final_outputs = []
 
-                for idx, part_path in enumerate(video_parts):
+                restorer = get_gfpgan_model() if enhance_toggle else None
 
+                for idx, part_path in enumerate(video_parts):
                     st.info(f"Processing part {idx+1} of {len(video_parts)}...")
 
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_out:
                         processed_raw_path = tmp_out.name
 
+                    # Detect faces in original video
                     st.info("Detecting faces in original video...")
                     original_faces = collect_faces_from_video(part_path, detector, method)
                     all_original_faces.extend(original_faces)
 
+                    # Compress and filter similar frames
                     st.info("Compressing video...")
                     filter_similar_frames(part_path, processed_raw_path, threshold)
 
-                    processed_final_path = processed_raw_path.replace(".mp4", "_h264.mp4")
+                    # --- Enhance faces in processed video ---
+                    cap = cv2.VideoCapture(processed_raw_path)
+                    fps = cap.get(cv2.CAP_PROP_FPS)
+                    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    processed_final_path = processed_raw_path.replace(".mp4", "_h264_enhanced.mp4")
+                    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                    out = cv2.VideoWriter(processed_final_path, fourcc, fps, (width, height))
 
-                    subprocess.run([
-                        FFMPEG_PATH,
-                        "-y",
-                        "-i", processed_raw_path,
-                        "-vcodec", "libx264",
-                        "-preset", "fast",
-                        "-crf", "23",
-                        "-pix_fmt", "yuv420p",
-                        processed_final_path
-                    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    frame_idx = 0
+                    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    progress = st.progress(0)
+
+                    while True:
+                        ret, frame = cap.read()
+                        if not ret:
+                            break
+                        frame_idx += 1
+                        progress.progress(min(frame_idx / total_frames, 1.0))
+
+                        if enhance_toggle and restorer is not None:
+                            frame = enhance_detected_faces(frame, detector, method, restorer)
+
+                        out.write(frame)
+
+                    cap.release()
+                    out.release()
+                    progress.empty()
 
                     final_outputs.append(processed_final_path)
 
+                    # Collect faces from enhanced processed video
                     processed_faces = collect_faces_from_video(processed_final_path, detector, method)
                     all_processed_faces.extend(processed_faces)
 
                 st.success("Processing Complete!")
-
-                for video in final_outputs:
-                    st.video(video)
 
                 def show_gallery(title, faces):
                     st.subheader(title)
@@ -291,11 +323,9 @@ with center_col:
                 show_gallery("Faces in Processed Video", all_processed_faces)
 
                 st.subheader("Download Processed Video Parts")
-
                 for idx, video_path in enumerate(final_outputs):
                     with open(video_path, "rb") as f:
                         video_bytes = f.read()
-
                     st.download_button(
                         label=f"Download Processed Video - Part {idx+1}",
                         data=video_bytes,
@@ -305,7 +335,6 @@ with center_col:
 
             except Exception as e:
                 st.error(f"Error: {e}")
-
             finally:
                 try:
                     os.remove(original_path)
@@ -324,5 +353,4 @@ with right_col:
              (adsbygoogle = window.adsbygoogle || []).push({});
         </script>
     </div>
-
     """, height=650)
