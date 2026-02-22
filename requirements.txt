@@ -1,8 +1,5 @@
 streamlit
 opencv-python
 numpy
-torch
-torchvision
-basicsr
-gfpgan
 ffmpeg-python
+
