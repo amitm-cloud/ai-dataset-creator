@@ -75,7 +75,7 @@ with left_col:
 
 # ================== MAIN CONTENT ==================
 with center_col:
-    st.title("🎥 Video Frame Reducer + Dual Face Detection")
+    st.title("🎥 AI DataSet Creator + Video Frame Reducer + Dual Face Detection")
     
     # ✅ Checkbox to enable/disable face enhancement
     enhance_toggle = st.checkbox("Enable AI Face Enhancement (GFPGAN)", value=True)
@@ -354,3 +354,4 @@ with right_col:
         </script>
     </div>
     """, height=650)
+
