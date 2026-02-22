@@ -1,15 +1,8 @@
-# Streamlit app dependencies
 streamlit==1.26.0
-streamlit-components
-
-# Core libraries
-numpy==1.25.0
 opencv-python-headless==4.8.1.78
-
-# GFPGAN dependencies
+numpy==1.25.0
 torch==2.2.0+cpu
-torchvision==0.17.0+cpu
+torchvision==0.17.1+cpu
 gfpgan==1.3.8
-
-# Optional: for video processing (FFmpeg should be installed in system PATH)
+basicsr==1.4.2
 ffmpeg-python==0.2.2
