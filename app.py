@@ -38,7 +38,7 @@ with left_col:
 # ================== MAIN CONTENT ==================
 with center_col:
 
-    st.title("🎥 Video Frame Reducer + Dual Face Detection")
+    st.title("🎥 AI DataSet Creator + Video Frame Reducer + Dual Face Detection")
 
     # --------- HELPERS ---------
     def mse(img1, img2):
@@ -324,4 +324,5 @@ with right_col:
              (adsbygoogle = window.adsbygoogle || []).push({});
         </script>
     </div>
+
     """, height=650)
