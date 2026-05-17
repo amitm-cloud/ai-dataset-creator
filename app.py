@@ -3,9 +3,19 @@ import numpy as np
 import streamlit as st
 import tempfile
 import os
+#os.system("apt-get update && apt-get install -y ffmpeg")
 import subprocess
 import streamlit.components.v1 as components
 #import streamlit.iframe as components
+import mediapipe as mp
+from mediapipe.python.solutions import face_detection
+
+# @st.cache_resource
+# def load_cv():
+#     import cv2
+#     return cv2
+
+#st.write(os.system("which ffmpeg"))
 
 # ================== CONFIG ==================
 CASCADE_PATH = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
@@ -56,36 +66,166 @@ with center_col:
             raise RuntimeError("DNN model files not found.")
         return cv2.dnn.readNetFromCaffe(DNN_PROTO, DNN_MODEL)
 
-    def detect_faces(frame_bgr, detector, method="haar", conf_threshold=0.5):
+    def load_mediapipe():
+
+        detector = face_detection.FaceDetection(
+            model_selection=1,
+            min_detection_confidence=0.3
+        )
+
+        return detector
+
+
+    # def detect_faces(frame_bgr, detector, method="haar", conf_threshold=0.3):
+    #     crops = []
+    #     h, w = frame_bgr.shape[:2]
+
+    #     if method == "haar":
+    #         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    #         gray = cv2.equalizeHist(gray)
+    #         #faces = detector.detectMultiScale(gray, 1.1, 5, minSize=(40, 40))
+            
+    #         faces = detector.detectMultiScale(
+    #             gray,
+    #             scaleFactor=1.05,
+    #             minNeighbors=3,
+    #             minSize=(20, 20)
+    #             )
+
+    #         for (x, y, fw, fh) in faces:
+    #             crops.append(frame_bgr[y:y+fh, x:x+fw])
+    #     else:
+    #         blob = cv2.dnn.blobFromImage(
+    #             cv2.resize(frame_bgr, (300, 300)),
+    #             1.0,
+    #             (300, 300),
+    #             (104.0, 177.0, 123.0)
+    #         )
+    #         detector.setInput(blob)
+    #         detections = detector.forward()
+
+    #         for i in range(detections.shape[2]):
+    #             confidence = detections[0, 0, i, 2]
+    #             if confidence > conf_threshold:
+    #                 box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+    #                 (x1, y1, x2, y2) = box.astype("int")
+    #                 x1, y1 = max(0, x1), max(0, y1)
+    #                 x2, y2 = min(w, x2), min(h, y2)
+    #                 #crops.append(frame_bgr[y1:y2, x1:x2])
+    #                 pad = 20
+
+    #                 x1 = max(0, x1 - pad)
+    #                 y1 = max(0, y1 - pad)
+    #                 x2 = min(w, x2 + pad)
+    #                 y2 = min(h, y2 + pad)
+
+    #                 crops.append(frame_bgr[y1:y2, x1:x2])
+
+
+    #     return crops
+
+
+    def detect_faces(frame_bgr, detector, method="haar", conf_threshold=0.3):
+
         crops = []
+
         h, w = frame_bgr.shape[:2]
 
+        # ================= HAAR =================
         if method == "haar":
+
             gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
             gray = cv2.equalizeHist(gray)
-            faces = detector.detectMultiScale(gray, 1.1, 5, minSize=(40, 40))
+
+            faces = detector.detectMultiScale(
+                gray,
+                scaleFactor=1.05,
+                minNeighbors=3,
+                minSize=(20, 20)
+            )
+
             for (x, y, fw, fh) in faces:
-                crops.append(frame_bgr[y:y+fh, x:x+fw])
-        else:
+
+                pad = 20
+
+                x1 = max(0, x - pad)
+                y1 = max(0, y - pad)
+                x2 = min(w, x + fw + pad)
+                y2 = min(h, y + fh + pad)
+
+                crop = frame_bgr[y1:y2, x1:x2]
+
+                if crop.size > 0:
+                    crops.append(crop)
+
+        # ================= DNN =================
+        elif method == "dnn":
+
             blob = cv2.dnn.blobFromImage(
                 cv2.resize(frame_bgr, (300, 300)),
                 1.0,
                 (300, 300),
                 (104.0, 177.0, 123.0)
             )
+
             detector.setInput(blob)
+
             detections = detector.forward()
 
             for i in range(detections.shape[2]):
+
                 confidence = detections[0, 0, i, 2]
+
                 if confidence > conf_threshold:
+
                     box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+
                     (x1, y1, x2, y2) = box.astype("int")
-                    x1, y1 = max(0, x1), max(0, y1)
-                    x2, y2 = min(w, x2), min(h, y2)
-                    crops.append(frame_bgr[y1:y2, x1:x2])
+
+                    pad = 20
+
+                    x1 = max(0, x1 - pad)
+                    y1 = max(0, y1 - pad)
+                    x2 = min(w, x2 + pad)
+                    y2 = min(h, y2 + pad)
+
+                    crop = frame_bgr[y1:y2, x1:x2]
+
+                    if crop.size > 0:
+                        crops.append(crop)
+
+        # ================= MEDIAPIPE =================
+        elif method == "mediapipe":
+
+            rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+
+            results = detector.process(rgb)
+
+            if results.detections:
+
+                for detection in results.detections:
+
+                    bbox = detection.location_data.relative_bounding_box
+
+                    x = int(bbox.xmin * w)
+                    y = int(bbox.ymin * h)
+                    bw = int(bbox.width * w)
+                    bh = int(bbox.height * h)
+
+                    pad = 20
+
+                    x1 = max(0, x - pad)
+                    y1 = max(0, y - pad)
+                    x2 = min(w, x + bw + pad)
+                    y2 = min(h, y + bh + pad)
+
+                    crop = frame_bgr[y1:y2, x1:x2]
+
+                    if crop.size > 0:
+                        crops.append(crop)
 
         return crops
+
 
     # -------- Unique Face Filter --------
     def is_new_crop(crop, gallery, threshold=0.2):
@@ -107,7 +247,7 @@ with center_col:
         return True
 
     # -------- Collect Faces --------
-    def collect_faces_from_video(video_path, detector, method, max_items=30, step=5):
+    def collect_faces_from_video(video_path, detector, method, max_items=100, step=2):
         cap = cv2.VideoCapture(video_path)
 
         if not cap.isOpened():
@@ -129,8 +269,9 @@ with center_col:
             if frame_idx % step != 0:
                 continue
 
-            frame_small = cv2.resize(frame, None, fx=0.5, fy=0.5)
-            crops = detect_faces(frame_small, detector, method)
+            #frame_small = cv2.resize(frame, None, fx=0.5, fy=0.5)
+            #crops = detect_faces(frame_small, detector, method)
+            crops = detect_faces(frame, detector, method)
 
             for crop in crops:
                 if len(gallery) >= max_items:
@@ -189,16 +330,34 @@ with center_col:
 
         output_pattern = input_path.replace(".mp4", "_part_%03d.mp4")
 
-        subprocess.run([
-            FFMPEG_PATH,
-            "-i", input_path,
-            "-c", "copy",
-            "-map", "0",
-            "-f", "segment",
-            "-segment_time", "600",
-            "-reset_timestamps", "1",
-            output_pattern
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cap = cv2.VideoCapture(processed_raw_path)
+
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        out = cv2.VideoWriter(processed_final_path, fourcc, fps, (width, height))
+
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            out.write(frame)
+
+        cap.release()
+        out.release()
+
+        # subprocess.run([
+        #     FFMPEG_PATH,
+        #     "-i", input_path,
+        #     "-c", "copy",
+        #     "-map", "0",
+        #     "-f", "segment",
+        #     "-segment_time", "600",
+        #     "-reset_timestamps", "1",
+        #     output_pattern
+        # ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         parts = sorted([
             os.path.join(os.path.dirname(input_path), f)
@@ -214,7 +373,7 @@ with center_col:
 
     detector_choice = st.radio(
         "Choose Face Detection Method:",
-        ["Haar Cascade (Fast)", "DNN (More Accurate)"]
+        ["Haar Cascade (Fast)", "DNN (More Accurate)", "MediaPipe(Latest)"]
     )
 
     if uploaded_file is not None:
@@ -222,9 +381,13 @@ with center_col:
         if "Haar" in detector_choice:
             detector = load_haar()
             method = "haar"
-        else:
+        elif  "dnn" in detector_choice:
             detector = load_dnn()
             method = "dnn"
+        else :
+            detector = load_mediapipe()
+            method = "mediapipe"
+
 
         st.video(uploaded_file)
 
@@ -255,18 +418,37 @@ with center_col:
                     st.info("Compressing video...")
                     filter_similar_frames(part_path, processed_raw_path, threshold)
 
-                    processed_final_path = processed_raw_path.replace(".mp4", "_h264.mp4")
+                    #processed_final_path = processed_raw_path.replace(".mp4", "_h264.mp4")
+                    processed_final_path = processed_raw_path.replace(".mp4", "_final.mp4")
 
-                    subprocess.run([
-                        FFMPEG_PATH,
-                        "-y",
-                        "-i", processed_raw_path,
-                        "-vcodec", "libx264",
-                        "-preset", "fast",
-                        "-crf", "23",
-                        "-pix_fmt", "yuv420p",
-                        processed_final_path
-                    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    cap = cv2.VideoCapture(processed_raw_path)
+
+                    fps = cap.get(cv2.CAP_PROP_FPS)
+                    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+                    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                    out = cv2.VideoWriter(processed_final_path, fourcc, fps, (width, height))
+
+                    while True:
+                        ret, frame = cap.read()
+                        if not ret:
+                            break
+                        out.write(frame)
+
+                    cap.release()
+                    out.release()
+
+                    # subprocess.run([
+                    #     FFMPEG_PATH,
+                    #     "-y",
+                    #     "-i", processed_raw_path,
+                    #     "-vcodec", "libx264",
+                    #     "-preset", "fast",
+                    #     "-crf", "23",
+                    #     "-pix_fmt", "yuv420p",
+                    #     processed_final_path
+                    # ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
                     final_outputs.append(processed_final_path)
 
